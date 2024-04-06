@@ -1,76 +1,140 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from keras.models import load_model
 import streamlit as st
-import plotly.graph_objects as go
-from sklearn.preprocessing import MinMaxScaler
+import plotly.graph_objs as go
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-model = load_model(r"C:\Users\chetan\OneDrive\Desktop\j\Stock Predictions Model1.keras")
+# Function to download historical stock price data
+def download_stock_data(stock_symbol, start_date, end_date):
+    data = yf.download(stock_symbol, start=start_date, end=end_date)
+    return data
 
-st.header('Stock Market Predictor')
-stock = st.text_input('Enter stock symbol', 'GOOG')
-start = '2012-01-01'
-end = '2024-02-14'
-try:
-    # Attempt to download data from yfinance
-    data = yf.download(stock, start, end)
+# Function to calculate technical indicators
+def calculate_technical_indicators(data):
+    # Calculate Exponential Moving Averages (EMA)
+    data['EMA_12'] = data['Close'].ewm(span=12, adjust=False).mean()
+    data['EMA_26'] = data['Close'].ewm(span=26, adjust=False).mean()
 
-    # Check if data is not empty
-    if not data.empty:
-        st.subheader('Stock Data')
-        st.write(data)
+    # Calculate Moving Average Convergence Divergence (MACD)
+    data['MACD'] = data['EMA_12'] - data['EMA_26']
+    data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
 
-        data_train = pd.DataFrame(data.Close[0:int(len(data) * 0.80)])
-        data_test = pd.DataFrame(data.Close[int(len(data) * 0.80):len(data)])
+    # Calculate Relative Strength Index (RSI)
+    delta = data['Close'].diff(1)
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    data['RSI'] = 100 - (100 / (1 + rs))
 
-        # Check if data_test is not empty
-        if not data_test.empty:
-            scaler = MinMaxScaler(feature_range=(0, 1))
+    return data
 
-            pas_100_days = data_train.tail(100)
-            data_test = pd.concat([pas_100_days, data_test], ignore_index=True)
-            data_test_scale = scaler.fit_transform(data_test)
+# Function to train prediction model
+def train_prediction_model(data):
+    X = data[['EMA_12', 'EMA_26', 'MACD', 'MACD_Signal', 'RSI']]
+    y = data['Close']
 
-            ma_50_days = data.Close.rolling(50).mean()
-            ma_100_days = data.Close.rolling(100).mean()
-            ma_200_days = data.Close.rolling(200).mean()
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-            x = []
-            y = []
-            for i in range(100, data_test_scale.shape[0]):
-                x.append(data_test_scale[i - 100:i])
-                y.append(data_test_scale[i, 0])
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
 
-            x = np.array(x)
-            y = np.array(y)
+    # Evaluation
+    predictions = model.predict(X_test)
+    mse = mean_squared_error(y_test, predictions)
+    mae = mean_absolute_error(y_test, predictions)
 
-            predict = model.predict(x)
+    st.write('Mean Squared Error:', mse)
+    st.write('Mean Absolute Error:', mae)
 
-            scale = 1 / scaler.scale_
-            predict = predict * scale
-            y = y * scale
+    return model
 
-            # Create a single Plotly figure
-            fig = go.Figure()
+# Function to make predictions
+def predict_prices(model, data):
+    X_pred = data[['EMA_12', 'EMA_26', 'MACD', 'MACD_Signal', 'RSI']]
+    predictions = model.predict(X_pred)
+    return predictions
 
-            # Add traces for each line
-            fig.add_trace(go.Scatter(x=data.index, y=ma_50_days, name='MA50'))
-            fig.add_trace(go.Scatter(x=data.index, y=ma_100_days, name='MA100'))
-            fig.add_trace(go.Scatter(x=data.index, y=ma_200_days, name='MA200'))
-            fig.add_trace(go.Scatter(x=data.index, y=data.Close, name='Close'))
-            fig.add_trace(go.Scatter(x=data.index[-len(predict):], y=predict[:, 0], name='Original Price'))
-            fig.add_trace(go.Scatter(x=data.index[-len(y):], y=y, name='Predicted Price'))
+# Streamlit UI
+st.title('Stock Price Prediction with Technical Indicators')
 
-            # Update layout
-            fig.update_layout(title='Stock Data with Moving Averages and Predictions',
-                            xaxis_title='Date',
-                            yaxis_title='Price')
+# Sidebar for user inputs
+st.sidebar.header('User Inputs')
+stock_symbol = st.sidebar.text_input('Enter stock symbol', 'GOOG')
+start_date = st.sidebar.text_input('Enter start date (YYYY-MM-DD)', '2010-01-01')
+end_date = st.sidebar.text_input('Enter end date (YYYY-MM-DD)', '2022-01-01')
+chart_type = st.sidebar.selectbox('Select Chart Type', ['Line Chart', 'Candlestick Chart'])
 
-            st.plotly_chart(fig)
-        else:
-            st.error("Test data is empty. Please check your data range.")
-    else:
-        st.error("Data is empty. Please check your stock symbol or date range.")
-except Exception as e:
-    st.error(f"An error occurred: {e}")
+# Download stock data and calculate indicators
+data = download_stock_data(stock_symbol, start_date, end_date)
+data_with_indicators = calculate_technical_indicators(data)
+
+# Train prediction model
+model = train_prediction_model(data_with_indicators)
+
+# Make predictions
+predicted_prices = predict_prices(model, data_with_indicators)
+
+# Display stock data with indicators and predictions
+st.subheader('Stock Data with Technical Indicators and Predictions')
+st.write(data_with_indicators)
+st.write('Predicted Prices:', predicted_prices)
+
+# Plot technical indicators and predictions
+fig = go.Figure()
+
+# Plot Closing Price
+if chart_type == 'Candlestick Chart':
+    fig.add_trace(go.Candlestick(x=data_with_indicators.index,
+                                 open=data_with_indicators['Open'],
+                                 high=data_with_indicators['High'],
+                                 low=data_with_indicators['Low'],
+                                 close=data_with_indicators['Close'],
+                                 name='Candlestick'))
+else:
+    fig.add_trace(go.Scatter(x=data_with_indicators.index, y=data_with_indicators['Close'], name='Close'))
+
+# Plot EMA
+fig.add_trace(go.Scatter(x=data_with_indicators.index, y=data_with_indicators['EMA_12'], name='EMA 12'))
+fig.add_trace(go.Scatter(x=data_with_indicators.index, y=data_with_indicators['EMA_26'], name='EMA 26'))
+
+# Plot MACD and Signal line
+fig.add_trace(go.Scatter(x=data_with_indicators.index, y=data_with_indicators['MACD'], name='MACD'))
+fig.add_trace(go.Scatter(x=data_with_indicators.index, y=data_with_indicators['MACD_Signal'], name='MACD Signal'))
+
+# Plot RSI
+fig.add_trace(go.Scatter(x=data_with_indicators.index, y=data_with_indicators['RSI'], name='RSI'))
+
+# Add Predicted Prices
+fig.add_trace(go.Scatter(x=data_with_indicators.index, y=predicted_prices, mode='lines', name='Predicted Prices'))
+
+# Update layout
+fig.update_layout(title='Stock Price and Technical Indicators',
+                  xaxis_title='Date',
+                  yaxis_title='Value',
+                  width=1000,
+                  height=600,
+                  xaxis=dict(
+                      rangeselector=dict(
+                          buttons=list([
+                              dict(count=1, label='1m', step='month', stepmode='backward'),
+                              dict(count=6, label='6m', step='month', stepmode='backward'),
+                              dict(count=1, label='YTD', step='year', stepmode='todate'),
+                              dict(count=1, label='1y', step='year', stepmode='backward'),
+                              dict(step='all')
+                          ])
+                      ),
+                      rangeslider=dict(
+                          visible=True
+                      ),
+                      type='date'
+                  ),
+                  yaxis=dict(
+                      fixedrange=False  # Enable up-down scrolling
+                  ),
+                  dragmode='zoom')  # Enable zooming with the mouse scroll wheel
+
+# Display plot
+st.plotly_chart(fig, use_container_width=True)
